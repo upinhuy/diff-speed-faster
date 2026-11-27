@@ -225,9 +225,9 @@ function myersRuns(a, b) {
   return runs;
 }
 
-/** A line as the patch writes it: its op, the line, a newline, and "%" on a line of its own when it had none. */
-function written(op, line) {
-  return line.endsWith('\n') ? `${op}${line}` : `${op}${line}\n%\n`;
+/** One patch line: the op, the line itself, and a "%" line after it when the line had no newline of its own. */
+function emitLine(op, line) {
+  return line.endsWith('\n') ? op + line : op + line + '\n%\n';
 }
 
 /**
@@ -237,62 +237,71 @@ function written(op, line) {
  * lines apart sharing a hunk.
  */
 function patch(a, b, n, m, runs, byId) {
-  // The change runs: each a stretch of deletions and insertions between two
-  // kept lines, at old line o and new line p.
-  const changes = [];
-  let o = 0;
-  let p = 0;
+  // Group the script's edits into change blocks: a block is the deletions
+  // and insertions between two kept stretches, and it remembers where it
+  // sits in each text.
+  const blocks = [];
+  let oldLine = 0;
+  let newLine = 0;
   let deleted = 0;
   let inserted = 0;
   for (const [kind, count] of runs) {
     if (kind === KEEP) {
-      o += count;
-      p += count;
+      oldLine += count;
+      newLine += count;
       continue;
     }
-    let c = changes[changes.length - 1];
-    if (c === undefined || c.o + c.dels !== o || c.p + c.ins !== p) {
-      c = { o, p, dels: 0, ins: 0 };
-      changes.push(c);
-    }
+    const prev = blocks[blocks.length - 1];
+    const adjacent =
+      prev !== undefined && oldLine === prev.old + prev.del && newLine === prev.new + prev.ins;
+    const block = adjacent
+      ? prev
+      : { old: oldLine, new: newLine, del: 0, ins: 0 };
+    if (!adjacent) blocks.push(block);
     if (kind === DELETE) {
-      c.dels += count;
-      o += count;
+      block.del += count;
+      oldLine += count;
       deleted += count;
     } else {
-      c.ins += count;
-      p += count;
+      block.ins += count;
+      newLine += count;
       inserted += count;
     }
   }
 
-  // The hunks: change runs at most 2 * CONTEXT kept lines apart share one.
+  // Gather blocks into hunks: a hunk takes every block whose kept gap to
+  // the block before it is at most twice the context.
   const hunks = [];
-  for (const c of changes) {
-    const h = hunks[hunks.length - 1];
-    const prev = h !== undefined ? h[h.length - 1] : undefined;
-    if (prev !== undefined && c.o - (prev.o + prev.dels) <= 2 * CONTEXT) h.push(c);
-    else hunks.push([c]);
+  for (const block of blocks) {
+    const hunk = hunks[hunks.length - 1];
+    const lastBlock = hunk !== undefined ? hunk[hunk.length - 1] : undefined;
+    const gap = lastBlock === undefined ? Infinity : block.old - (lastBlock.old + lastBlock.del);
+    if (lastBlock !== undefined && gap <= 2 * CONTEXT) hunk.push(block);
+    else hunks.push([block]);
   }
 
   const out = [`makefun-diff/1 old=${n} new=${m} hunks=${hunks.length} deleted=${deleted} inserted=${inserted}\n`];
-  for (const h of hunks) {
-    const first = h[0];
-    const last = h[h.length - 1];
-    const oldStart = Math.max(0, first.o - CONTEXT);
-    const newStart = first.p - (first.o - oldStart);
-    const after = Math.min(CONTEXT, n - (last.o + last.dels));
-    const oldEnd = last.o + last.dels + after;
-    const newEnd = last.p + last.ins + after;
-    out.push(`@ ${oldStart + 1} ${oldEnd - oldStart} ${newStart + 1} ${newEnd - newStart}\n`);
-    let at = oldStart;
-    for (const c of h) {
-      for (; at < c.o; at++) out.push(written('=', byId[a[at]]));
-      for (let i = 0; i < c.dels; i++) out.push(written('-', byId[a[c.o + i]]));
-      for (let i = 0; i < c.ins; i++) out.push(written('+', byId[b[c.p + i]]));
-      at = c.o + c.dels;
+  for (const hunk of hunks) {
+    const head = hunk[0];
+    const tail = hunk[hunk.length - 1];
+    // How many kept lines the hunk shows ahead of its first block (never
+    // more than the context, and never before the text starts), and behind
+    // its last block (never more than the context, and never past the end).
+    const lead = Math.min(CONTEXT, head.old);
+    const trail = Math.min(CONTEXT, n - (tail.old + tail.del));
+    const oldFrom = head.old - lead;
+    const oldTo = tail.old + tail.del + trail;
+    const newFrom = head.new - lead;
+    const newTo = tail.new + tail.ins + trail;
+    out.push(`@ ${oldFrom + 1} ${oldTo - oldFrom} ${newFrom + 1} ${newTo - newFrom}\n`);
+    let at = oldFrom;
+    for (const block of hunk) {
+      for (; at < block.old; at++) out.push(emitLine('=', byId[a[at]]));
+      for (let i = 0; i < block.del; i++) out.push(emitLine('-', byId[a[block.old + i]]));
+      for (let i = 0; i < block.ins; i++) out.push(emitLine('+', byId[b[block.new + i]]));
+      at = block.old + block.del;
     }
-    for (; at < oldEnd; at++) out.push(written('=', byId[a[at]]));
+    for (; at < oldTo; at++) out.push(emitLine('=', byId[a[at]]));
   }
   return out.join('');
 }
