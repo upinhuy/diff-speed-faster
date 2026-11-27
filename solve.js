@@ -33,7 +33,7 @@ const KEEP = 0;
 const DELETE = 1;
 const INSERT = 2;
 
-/** The kept lines a hunk shows before and after each change run. */
+/** How many kept lines surround each change run inside a hunk. */
 const CONTEXT = 3;
 
 /**
